@@ -1,1 +1,108 @@
-Hello GitHub!
+# Simulación de 100,000 manos de Blackjack con estrategia de conteo Hi-Lo
+# Reglas: 6 barajas, crupier planta en 17 (S17), pagos 3:2 al Blackjack
+# Apuesta = 4 unidades si TC ≥ 2, si no, 1 unidad
+
+import random
+import numpy as np
+import pandas as pd
+
+n_hands = 100000
+cards_per_rank = 6 * 4
+ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+hi_lo_values = {
+    '2': 1, '3': 1, '4': 1, '5': 1, '6': 1,
+    '7': 0, '8': 0, '9': 0,
+    '10': -1, 'J': -1, 'Q': -1, 'K': -1, 'A': -1
+}
+
+def card_value(card):
+    return 11 if card == 'A' else 10 if card in ['10', 'J', 'Q', 'K'] else int(card)
+
+def create_shoe():
+    shoe = []
+    for r in ranks:
+        shoe.extend([r] * cards_per_rank)
+    random.shuffle(shoe)
+    return shoe
+
+def draw_card(shoe, running_count):
+    card = shoe.pop()
+    running_count += hi_lo_values[card]
+    return card, running_count
+
+def hand_total(hand):
+    total = sum(card_value(c) for c in hand)
+    aces = hand.count('A')
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+def basic_strategy(hand, dealer_card, shoe, running_count):
+    while hand_total(hand) < 17:
+        card, running_count = draw_card(shoe, running_count)
+        hand.append(card)
+    return hand, running_count
+
+def simulate_counting_hand(shoe, running_count):
+    if len(shoe) < 75:
+        shoe = create_shoe()
+        running_count = 0
+
+    player, dealer = [], []
+    for _ in range(2):
+        c, running_count = draw_card(shoe, running_count)
+        player.append(c)
+        c, running_count = draw_card(shoe, running_count)
+        dealer.append(c)
+
+    tc = running_count / (len(shoe) / 52)
+    bet = 4 if tc >= 2 else 1
+
+    player_total, dealer_total = hand_total(player), hand_total(dealer)
+    player_bj = player_total == 21 and len(player) == 2
+    dealer_bj = dealer_total == 21 and len(dealer) == 2
+
+    if player_bj and dealer_bj: return 0, bet, shoe, running_count
+    if player_bj: return 1.5, bet, shoe, running_count
+    if dealer_bj: return -1, bet, shoe, running_count
+
+    player, running_count = basic_strategy(player, dealer[0], shoe, running_count)
+    while hand_total(dealer) < 17:
+        c, running_count = draw_card(shoe, running_count)
+        dealer.append(c)
+
+    pt, dt = hand_total(player), hand_total(dealer)
+    if pt > 21: return -1, bet, shoe, running_count
+    if dt > 21: return 1, bet, shoe, running_count
+    if pt > dt: return 1, bet, shoe, running_count
+    if pt < dt: return -1, bet, shoe, running_count
+    return 0, bet, shoe, running_count
+
+# Ejecutar simulación
+shoe = create_shoe()
+running_count = 0
+gains, bets = [], []
+
+for _ in range(n_hands):
+    res, bet, shoe, running_count = simulate_counting_hand(shoe, running_count)
+    gains.append(res * bet)
+    bets.append(bet)
+
+# Estadísticas
+ev = np.mean(gains)
+se = np.std(gains, ddof=1) / np.sqrt(n_hands)
+win_pct = sum(1 for g in gains if g > 0) / n_hands * 100
+loss_pct = sum(1 for g in gains if g < 0) / n_hands * 100
+push_pct = sum(1 for g in gains if g == 0) / n_hands * 100
+avg_bet = np.mean(bets)
+
+# Mostrar tabla de resultados
+pd.DataFrame([{
+    'EV': round(ev, 4),
+    'Error estándar': round(se, 4),
+    '% Ganadas': round(win_pct, 2),
+    '% Perdidas': round(loss_pct, 2),
+    '% Empates': round(push_pct, 2),
+    'Apuesta media': round(avg_bet, 2)
+}])
