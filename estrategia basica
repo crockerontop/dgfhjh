@@ -1,0 +1,102 @@
+import random
+import numpy as np
+import pandas as pd
+
+# Parámetros de simulación
+n_hands = 100000
+cards_per_rank = 6 * 4  # 6 barajas, 4 cartas por rango
+ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+
+def card_value(card):
+    if card in ['J', 'Q', 'K', '10']:
+        return 10
+    elif card == 'A':
+        return 11
+    else:
+        return int(card)
+
+def create_shoe():
+    shoe = []
+    for rank in ranks:
+        shoe.extend([rank] * cards_per_rank)
+    random.shuffle(shoe)
+    return shoe
+
+def draw_card(shoe):
+    return shoe.pop()
+
+def hand_total(hand):
+    total = sum(card_value(c) for c in hand)
+    aces = hand.count('A')
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+# Estrategia básica simplificada: plantarse en 17+
+def basic_strategy(player_hand, dealer_upcard):
+    while hand_total(player_hand) < 17:
+        player_hand.append(draw_card(shoe))
+    return player_hand
+
+def simulate_basic_hand():
+    global shoe
+    if len(shoe) < 52:
+        shoe = create_shoe()
+
+    player = [draw_card(shoe), draw_card(shoe)]
+    dealer = [draw_card(shoe), draw_card(shoe)]
+    dealer_upcard = dealer[0]
+
+    player_bj = hand_total(player) == 21 and len(player) == 2
+    dealer_bj = hand_total(dealer) == 21 and len(dealer) == 2
+
+    if player_bj and dealer_bj:
+        return 0
+    elif player_bj:
+        return 1.5
+    elif dealer_bj:
+        return -1
+
+    player = basic_strategy(player, dealer_upcard)
+
+    while hand_total(dealer) < 17:
+        dealer.append(draw_card(shoe))
+
+    p_total = hand_total(player)
+    d_total = hand_total(dealer)
+
+    if p_total > 21:
+        return -1
+    elif d_total > 21:
+        return 1
+    elif p_total > d_total:
+        return 1
+    elif p_total < d_total:
+        return -1
+    else:
+        return 0
+
+# Ejecutar simulación
+shoe = create_shoe()
+results = [simulate_basic_hand() for _ in range(n_hands)]
+
+# Estadísticas
+ev = np.mean(results)
+se = np.std(results, ddof=1) / np.sqrt(n_hands)
+win_pct = results.count(1) / n_hands * 100
+loss_pct = results.count(-1) / n_hands * 100
+push_pct = results.count(0) / n_hands * 100
+bj_win_pct = results.count(1.5) / n_hands * 100
+
+# Mostrar resultados
+df = pd.DataFrame([{
+    'EV': ev,
+    'Error estándar': se,
+    '% Ganadas': win_pct,
+    '% Perdidas': loss_pct,
+    '% Empates': push_pct,
+    '% BJ ganados': bj_win_pct
+}])
+
+print(df)
