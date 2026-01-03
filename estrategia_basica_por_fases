@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+import random
+import math
+import argparse
+
+# ============================================================
+# Defaults / Config (can be overridden from CLI)
+# ============================================================
+NUM_DECKS = 6
+CARDS_PER_DECK = 52
+CUT_CARDS = 52      # shuffle/cut when remaining cards <= CUT_CARDS (default: 1 deck)
+N_GAMES = 100000    # number of shoes to simulate (default)
+BJ_PAYOUT = 1.5     # blackjack pays 3:2
+S17 = True          # dealer stands on all 17 (including soft 17)
+
+PHASES = ["initial", "middle", "final"]
+# Phase definitions (decks remaining):
+# - initial: decks_remaining >= 4
+# - middle : 2 <= decks_remaining < 4
+# - final  : decks_remaining < 2
+
+# ============================================================
+# Card / shoe utilities
+# ============================================================
+RANKS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11]  # 10,J,Q,K=10, A=11
+
+def build_shoe(num_decks=NUM_DECKS):
+    shoe = []
+    for _ in range(num_decks):
+        for r in RANKS:
+            shoe.extend([r] * 4)
+    random.shuffle(shoe)
+    return shoe
+
+def hand_value(hand):
+    total = sum(hand)
+    aces = sum(1 for c in hand if c == 11)
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+    return total
+
+def is_blackjack(hand):
+    return len(hand) == 2 and hand_value(hand) == 21
+
+def dealer_should_hit(hand):
+    total = hand_value(hand)
+    if total < 17:
+        return True
+    if total > 17:
+        return False
+    # total == 17: depends on S17 (stand on all 17) vs H17 (hit soft 17)
+    if not S17:
+        # Hit soft 17: detect if there's an ace counted as 11 in the raw sum
+        total_raw = sum(hand)
+        return (11 in hand) and (total_raw == 17)
+    return False
+
+# ============================================================
+# Player strategy (basic): simplified - stand on 17+, hit otherwise
+# ============================================================
+def play_player_basic(player_hand, dealer_upcard, shoe):
+    while hand_value(player_hand) < 17:
+        if not shoe:
+            break
+        player_hand.append(shoe.pop())
+        if hand_value(player_hand) > 21:
+            break
+    return player_hand
+
+# ============================================================
+# Single-hand simulation (uses basic strategy)
+# ============================================================
+def simulate_hand_basic(shoe):
+    """
+    Plays one hand using basic strategy (no bet spreading).
+    Returns: profit (float; +1, -1, 0, +1.5 for BJ), phase (str), player_bj(bool)
+    Note: The function consumes cards from shoe in the order:
+      player, dealer, player, dealer (and subsequent draws).
+    """
+    # Determine phase by decks remaining at hand start
+    decks_remaining = len(shoe) / CARDS_PER_DECK
+    if decks_remaining >= 4:
+        phase = "initial"
+    elif decks_remaining >= 2:
+        phase = "middle"
+    else:
+        phase = "final"
+
+    # If not enough cards to deal initial hand, indicate shoe exhausted
+    if len(shoe) < 4:
+        # signal to caller to reshuffle
+        return None, None, None
+
+    player = []
+    dealer = []
+
+    # deal
+    player.append(shoe.pop())
+    dealer.append(shoe.pop())
+    player.append(shoe.pop())
+    dealer.append(shoe.pop())
+
+    dealer_upcard = dealer[0]
+
+    p_bj = is_blackjack(player)
+    d_bj = is_blackjack(dealer)
+
+    if p_bj and d_bj:
+        return 0.0, phase, True
+    if p_bj and not d_bj:
+        return BJ_PAYOUT, phase, True
+    if d_bj and not p_bj:
+        return -1.0, phase, False
+
+    # Player plays using simplified basic strategy
+    player = play_player_basic(player, dealer_upcard, shoe)
+    pt = hand_value(player)
+    if pt > 21:
+        return -1.0, phase, False
+
+    # Dealer plays
+    while dealer_should_hit(dealer):
+        if not shoe:
+            break
+        dealer.append(shoe.pop())
+    dt = hand_value(dealer)
+    if dt > 21:
+        return 1.0, phase, False
+
+    # Compare totals
+    if pt > dt:
+        return 1.0, phase, False
+    elif pt < dt:
+        return -1.0, phase, False
+    else:
+        return 0.0, phase, False
+
+# ============================================================
+# Experiment harness: run many shoes, aggregate by phase
+# ============================================================
+def run_experiment_basic(n_games, cut_cards=CUT_CARDS):
+    # collect profits per phase
+    profits = {ph: [] for ph in PHASES}
+    stats = {ph: {"win":0, "loss":0, "push":0, "bj":0, "n":0} for ph in PHASES}
+
+    for _ in range(n_games):
+        shoe = build_shoe(NUM_DECKS)
+        # play until cut
+        while len(shoe) > cut_cards:
+            profit, phase, player_bj = simulate_hand_basic(shoe)
+            if profit is None:  # shoe exhausted unexpectedly; break and reshuffle
+                break
+            profits[phase].append(profit)
+            stats[phase]["n"] += 1
+            if profit > 0:
+                stats[phase]["win"] += 1
+            elif profit < 0:
+                stats[phase]["loss"] += 1
+            else:
+                stats[phase]["push"] += 1
+            if player_bj:
+                stats[phase]["bj"] += 1
+
+    # compute summary rows: phase, n, EV, SE, win%, loss%, push%, BJ%
+    rows = []
+    for ph in PHASES:
+        x = profits[ph]
+        n = len(x)
+        if n == 0:
+            rows.append([ph, 0, "", "", "", "", "", ""])
+            continue
+        ev = sum(x) / n
+        if n > 1:
+            var = sum((v-ev)**2 for v in x) / (n-1)
+        else:
+            var = 0.0
+        se = math.sqrt(var) / math.sqrt(n) if n > 1 else 0.0
+        win = stats[ph]["win"]
+        loss = stats[ph]["loss"]
+        push = stats[ph]["push"]
+        bj = stats[ph]["bj"]
+        rows.append([
+            ph,
+            n,
+            ev,
+            se,
+            100*win/n,
+            100*loss/n,
+            100*push/n,
+            100*bj/n
+        ])
+    return rows
+
+def write_tsv(rows, filename="estrategia_basica_by_phase.tsv"):
+    header = ["phase","n","EV","SE","win_pct","loss_pct","push_pct","BJ_pct"]
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\t".join(header) + "\n")
+        for r in rows:
+            out = []
+            for v in r:
+                if v == "":
+                    out.append("")
+                elif isinstance(v, float):
+                    out.append(f"{v:.6f}")
+                else:
+                    out.append(str(v))
+            f.write("\t".join(out) + "\n")
+
+# ============================================================
+# CLI
+# ============================================================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(prog="estrategia_basica_por_fase")
+    parser.add_argument("--n", type=int, default=N_GAMES, help="Number of shoes to simulate")
+    parser.add_argument("--cut", type=int, default=CUT_CARDS, help="Cut cards threshold (remaining cards)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed (optional)")
+    parser.add_argument("--output", type=str, default="estrategia_basica_by_phase.tsv", help="Output TSV path")
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    rows = run_experiment_basic(args.n, cut_cards=args.cut)
+    write_tsv(rows, args.output)
+    print(f"Done. Output written to: {args.output}")
