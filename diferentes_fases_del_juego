@@ -1,0 +1,335 @@
+import random
+import math
+from collections import defaultdict
+
+# ============================================================
+# CONFIG
+# ============================================================
+NUM_DECKS = 6
+CARDS_PER_DECK = 52
+SHOE_SIZE = NUM_DECKS * CARDS_PER_DECK
+
+# Penetración: barajamos cuando quedan <= cut_cards
+# (en casino típico se corta; ajusta si quieres)
+CUT_CARDS = 52  # corta cuando queda 1 mazo
+
+N_GAMES = 100000
+
+# Fases según mazos restantes (tú pediste 4, 2 y "0"; en práctica final ~ <2)
+# - "initial": decks_remaining >= 4
+# - "middle": 2 <= decks_remaining < 4
+# - "final": decks_remaining < 2
+PHASES = ["initial", "middle", "final"]
+
+RC_MIN, RC_MAX = -5, 5
+
+# Reglas de pago
+BJ_PAYOUT = 1.5  # 3:2
+S17 = True       # dealer stands on all 17 (incl. soft 17)
+
+# Betting (conteo) — lo ajustas a tu criterio
+# Ejemplo: spread 1-8 con "grandes" a partir de TC>=8 (tu última idea)
+def bet_from_true_count(tc: float) -> int:
+    # Spread 1-8
+    if tc >= 8:
+        return 8
+    elif tc >= 6:
+        return 4
+    elif tc >= 4:
+        return 2
+    else:
+        return 1
+
+
+# ============================================================
+# CARD / HAND UTILITIES
+# ============================================================
+# Representación de cartas por rango:
+# 2-9 como int; 10 como 10; J,Q,K como 10; A como 11 en valor base
+RANKS = [2,3,4,5,6,7,8,9,10,10,10,10,11]  # 10,J,Q,K=10; A=11
+
+def build_shoe(num_decks=NUM_DECKS):
+    shoe = []
+    for _ in range(num_decks):
+        # 4 palos por rango (13 rangos)
+        # RANKS ya incluye 10 repetido 4 veces (10,J,Q,K)
+        for r in RANKS:
+            # 4 copias por palo
+            shoe.extend([r]*4)
+    random.shuffle(shoe)
+    return shoe
+
+def is_ace(card):
+    return card == 11
+
+def hand_value(hand):
+    total = sum(hand)
+    # Ajuste de ases: 11 -> 1 si nos pasamos
+    aces = sum(1 for c in hand if c == 11)
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+    return total
+
+def is_blackjack(hand):
+    return len(hand) == 2 and hand_value(hand) == 21
+
+def dealer_should_hit(hand):
+    total = hand_value(hand)
+    if total < 17:
+        return True
+    if total > 17:
+        return False
+    # total == 17:
+    if not S17:
+        # H17: hit soft 17
+        # Soft 17 si hay un As contado como 11
+        # Para detectarlo: si hay As y valor total == 17 sin reducirlo
+        # Una forma simple: calcular "softness"
+        total_raw = sum(hand)
+        return (11 in hand) and (total_raw == 17)
+    return False
+
+# Hi-Lo counting values for card ranks:
+# 2-6 => +1, 7-9 => 0, 10/A => -1
+def hilo_value(card):
+    if 2 <= card <= 6:
+        return 1
+    if 7 <= card <= 9:
+        return 0
+    # 10 or 11(A)
+    return -1
+
+
+# ============================================================
+# STRATEGIES
+# ============================================================
+
+# 1) Random: hit/stand randomly (muy malo, baseline)
+def random_decision():
+    return random.choice(["hit", "stand"])
+
+def play_player_random(player_hand, dealer_upcard, shoe, running_count):
+    while True:
+        decision = random_decision()
+        if decision == "stand":
+            break
+        card = shoe.pop()
+        player_hand.append(card)
+        running_count += hilo_value(card)
+        if hand_value(player_hand) > 21:
+            break
+    return running_count
+
+# 2) Basic (simplificada): hit < 17, stand >= 17
+# (Si tienes tu tabla, sustituyes aquí)
+def play_player_basic(player_hand, dealer_upcard, shoe, running_count):
+    while True:
+        if hand_value(player_hand) >= 17:
+            break
+        card = shoe.pop()
+        player_hand.append(card)
+        running_count += hilo_value(card)
+        if hand_value(player_hand) > 21:
+            break
+    return running_count
+
+# 3) Counting: juega igual que basic (decisiones), pero apuesta depende de TC
+def play_player_counting(player_hand, dealer_upcard, shoe, running_count):
+    # mismas decisiones que basic (para aislar el efecto de bet sizing)
+    return play_player_basic(player_hand, dealer_upcard, shoe, running_count)
+
+
+# ============================================================
+# ONE HAND SIMULATION
+# ============================================================
+def simulate_hand(shoe, running_count, strategy_name):
+    """
+    Devuelve:
+    - net_profit (en unidades): +bet, -bet, 0, +1.5*bet si BJ player
+    - bet
+    - updated_running_count
+    - player_BJ (bool)
+    - phase (según mazos restantes al INICIO de la mano)
+    - rc_at_start (running count al inicio de la mano)
+    """
+    # Phase based on decks remaining at the start
+    decks_remaining = len(shoe) / CARDS_PER_DECK
+    if decks_remaining >= 4:
+        phase = "initial"
+    elif decks_remaining >= 2:
+        phase = "middle"
+    else:
+        phase = "final"
+
+    rc_at_start = running_count
+
+    # True count for betting (avoid divide by 0)
+    if decks_remaining < 0.25:
+        tc = running_count / 0.25
+    else:
+        tc = running_count / decks_remaining
+
+    # bet selection
+    if strategy_name == "counting":
+        bet = bet_from_true_count(tc)
+    else:
+        bet = 1  # random/basic fixed bet
+
+    # Deal initial cards:
+    # Dealer upcard, player cards, dealer hole (order doesn't matter too much, but be consistent)
+    # We'll do: player, dealer, player, dealer
+    player = []
+    dealer = []
+
+    c1 = shoe.pop(); player.append(c1); running_count += hilo_value(c1)
+    c2 = shoe.pop(); dealer.append(c2); running_count += hilo_value(c2)
+    c3 = shoe.pop(); player.append(c3); running_count += hilo_value(c3)
+    c4 = shoe.pop(); dealer.append(c4); running_count += hilo_value(c4)
+
+    dealer_upcard = dealer[0]
+
+    # Naturals
+    p_bj = is_blackjack(player)
+    d_bj = is_blackjack(dealer)
+
+    if p_bj and d_bj:
+        return 0.0, bet, running_count, True, phase, rc_at_start
+    if p_bj and not d_bj:
+        return BJ_PAYOUT * bet, bet, running_count, True, phase, rc_at_start
+    if d_bj and not p_bj:
+        return -1.0 * bet, bet, running_count, False, phase, rc_at_start
+
+    # Player play
+    if strategy_name == "random":
+        running_count = play_player_random(player, dealer_upcard, shoe, running_count)
+    elif strategy_name == "basic":
+        running_count = play_player_basic(player, dealer_upcard, shoe, running_count)
+    elif strategy_name == "counting":
+        running_count = play_player_counting(player, dealer_upcard, shoe, running_count)
+    else:
+        raise ValueError("Unknown strategy")
+
+    pt = hand_value(player)
+    if pt > 21:
+        return -1.0 * bet, bet, running_count, False, phase, rc_at_start
+
+    # Dealer play
+    while dealer_should_hit(dealer):
+        card = shoe.pop()
+        dealer.append(card)
+        running_count += hilo_value(card)
+
+    dt = hand_value(dealer)
+    if dt > 21:
+        return 1.0 * bet, bet, running_count, False, phase, rc_at_start
+
+    # Compare
+    if pt > dt:
+        return 1.0 * bet, bet, running_count, False, phase, rc_at_start
+    elif pt < dt:
+        return -1.0 * bet, bet, running_count, False, phase, rc_at_start
+    else:
+        return 0.0, bet, running_count, False, phase, rc_at_start
+
+
+# ============================================================
+# MAIN EXPERIMENT: 100k "games" (shoes)
+# ============================================================
+def run_experiment_counting_only():
+    """
+    Simula N_GAMES zapatos completos (cada zapato se juega hasta el corte).
+    Agrupa SOLO manos con RC in [-5,5], por fase y RC.
+    Calcula EV (por mano), SE, win/loss/push, BJ%.
+    """
+    # data[phase][rc] -> list of profits per hand (in units)
+    profits = {ph: {rc: [] for rc in range(RC_MIN, RC_MAX+1)} for ph in PHASES}
+    stats = {ph: {rc: {"win":0, "loss":0, "push":0, "bj":0, "n":0} for rc in range(RC_MIN, RC_MAX+1)} for ph in PHASES}
+
+    for _ in range(N_GAMES):
+        shoe = build_shoe(NUM_DECKS)
+        running_count = 0
+
+        # play shoe until cut
+        while len(shoe) > CUT_CARDS:
+            profit, bet, running_count, player_bj, phase, rc_at_start = simulate_hand(shoe, running_count, "counting")
+
+            # Filter RC range
+            if RC_MIN <= rc_at_start <= RC_MAX:
+                profits[phase][rc_at_start].append(profit)
+
+                stats[phase][rc_at_start]["n"] += 1
+                if profit > 0:
+                    stats[phase][rc_at_start]["win"] += 1
+                elif profit < 0:
+                    stats[phase][rc_at_start]["loss"] += 1
+                else:
+                    stats[phase][rc_at_start]["push"] += 1
+
+                # BJ counted as profit == 1.5*bet in this setup
+                # (player_bj True also catches push-BJ, but that's profit 0; we want player's natural rate)
+                # We'll record BJ if player got BJ regardless of outcome:
+                if player_bj:
+                    stats[phase][rc_at_start]["bj"] += 1
+
+    # Produce table rows
+    rows = []
+    for ph in PHASES:
+        for rc in range(RC_MIN, RC_MAX+1):
+            x = profits[ph][rc]
+            n = len(x)
+            if n == 0:
+                # keep empty row
+                rows.append([ph, rc, 0, "", "", "", "", "", ""])
+                continue
+
+            ev = sum(x) / n
+            # sample variance
+            if n > 1:
+                var = sum((v-ev)**2 for v in x) / (n-1)
+            else:
+                var = 0.0
+            se = math.sqrt(var) / math.sqrt(n) if n > 1 else 0.0
+
+            win = stats[ph][rc]["win"]
+            loss = stats[ph][rc]["loss"]
+            push = stats[ph][rc]["push"]
+            bj = stats[ph][rc]["bj"]
+
+            rows.append([
+                ph,
+                rc,
+                n,
+                ev,
+                se,
+                100*win/n,
+                100*loss/n,
+                100*push/n,
+                100*bj/n
+            ])
+
+    return rows
+
+
+def write_tsv(rows, filename="counting_by_phase_rc.tsv"):
+    # TSV (tab-separated) -> Excel friendly in Spain
+    header = ["phase","RC","n","EV","SE","win_pct","loss_pct","push_pct","BJ_pct"]
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\t".join(header) + "\n")
+        for r in rows:
+            # Keep empty cells as blank
+            out = []
+            for v in r:
+                if v == "":
+                    out.append("")
+                elif isinstance(v, float):
+                    out.append(f"{v:.6f}")
+                else:
+                    out.append(str(v))
+            f.write("\t".join(out) + "\n")
+
+
+if __name__ == "__main__":
+    rows = run_experiment_counting_only()
+    write_tsv(rows)
+    print("Done. Output written to: counting_by_phase_rc.tsv")
